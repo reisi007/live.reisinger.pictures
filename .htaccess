@@ -1,0 +1,22 @@
+RewriteEngine On
+RewriteBase /
+
+# 1. Redirect /gallery to / (Canonicalization)
+# Only triggers if the actual request is literally "/gallery"
+# R=301 makes it a permanent redirect, L stops processing
+RewriteCond %{THE_REQUEST} \s/gallery\s [NC]
+RewriteRule ^gallery/?$ / [R=301,L]
+
+# 2. Serve existing files and directories directly
+# If the request points to a real file (-f) or directory (-d), stop processing
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# 3. Handle the Root URL (/)
+# Internally rewrite root to index.php?path=gallery
+RewriteRule ^$ index.php?path=gallery [L,QSA]
+
+# 4. Handle all other paths (/<test>)
+# Internally rewrite /something to index.php?path=something
+RewriteRule ^(.+)$ index.php?path=$1 [L,QSA]
