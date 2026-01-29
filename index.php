@@ -1,24 +1,24 @@
 <?php
 /**
  * Single File PHP PhotoSwipe Gallery (Next-Gen Formats: AVIF/WebP + Picture Tag)
- * * Version: 1.8 (Recursive Cleanup)
+ * * Version: 1.9 (Hash-based Caching & Stale Cleanup)
  */
 
-// --- Konfiguration (Defaults) ---
-$defaultDir = 'gallery';       // Standardordner
-$thumbDirName = '_thumbnails'; // Ordnername für Vorschaubilder
-$thumbWidth = 500;             // Breite für Masonry Grid
-$thumbQualityJpg = 75;         // Qualität JPEG (0-100)
-$thumbQualityWebp = 75;        // Qualität WebP (0-100)
-$thumbQualityAvif = 45;        // Qualität AVIF (0-100, AVIF ist bei niedrigeren Werten effizienter)
-$cronSecret = 'MySecretKey123';
+// --- Configuration (Defaults) ---
+$defaultDir = 'gallery';       // Default folder
+$thumbDirName = '_thumbnails'; // Folder name for thumbnails
+$thumbWidth = 500;             // Width for Masonry Grid
+$thumbQualityJpg = 75;         // JPEG Quality (0-100)
+$thumbQualityWebp = 75;        // WebP Quality (0-100)
+$thumbQualityAvif = 45;        // AVIF Quality (0-100, AVIF is more efficient at lower values)
+$cronSecret = 'dhfdjshfjhdsfhkjsdhfjh';
 
-// Dateifilter
+// File filters
 $ignoredFiles = ['.', '..', 'index.php', $thumbDirName, '.DS_Store', 'Thumbs.db'];
 $validExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 
 // --- CAPABILITY CHECK ---
-// Wir prüfen einmalig, was der Server kann
+// Check once what the server supports
 $canAvif = function_exists('imageavif');
 $canWebp = function_exists('imagewebp');
 
@@ -49,7 +49,7 @@ if (!function_exists('createThumbnail')) {
 
         $thumbnail = imagecreatetruecolor($targetWidth, $targetHeight);
 
-        // Transparenz erhalten
+        // Preserve transparency
         if ($type == IMAGETYPE_PNG || $type == IMAGETYPE_WEBP || $type == IMAGETYPE_GIF) {
             imagecolortransparent($thumbnail, imagecolorallocatealpha($thumbnail, 0, 0, 0, 127));
             imagealphablending($thumbnail, false);
@@ -60,10 +60,10 @@ if (!function_exists('createThumbnail')) {
 
         $result = false;
         
-        // Zielformat schreiben
+        // Write target format
         switch ($format) {
             case 'avif':
-                // AVIF braucht oft PHP 8.1+ und eine aktuelle GD Lib
+                // AVIF often requires PHP 8.1+ and a current GD Lib
                 if (function_exists('imageavif')) {
                     $result = imageavif($thumbnail, $dest, $quality); 
                 }
@@ -92,7 +92,7 @@ $reqMode = null;
 $reqToken = null; 
 $reqPathInput = null; 
 $reqFile = null;
-$reqFmt = 'jpg'; // Default Format Anfrage
+$reqFmt = 'jpg'; // Default Format Request
 
 if ($isCli) {
     foreach ($argv as $arg) {
@@ -108,7 +108,7 @@ if ($isCli) {
     $reqFmt = isset($_GET['fmt']) ? $_GET['fmt'] : 'jpg';
 }
 
-// Pfad bereinigen
+// Sanitize path
 $targetDir = $reqPathInput ? $reqPathInput : $defaultDir;
 $targetDir = str_replace(['..', "\0"], '', $targetDir);
 $targetDir = trim($targetDir, '/\\');
@@ -127,7 +127,7 @@ if ($realSourcePath === false && !preg_match('/^[a-zA-Z0-9_\-\/]+$/', $targetDir
 $thumbPathAbs = $sourcePath . DIRECTORY_SEPARATOR . $thumbDirName;
 
 
-// --- LOGIK: THUMBNAIL DELIVERY (ON-THE-FLY) ---
+// --- LOGIC: THUMBNAIL DELIVERY (ON-THE-FLY) ---
 if ($reqMode === 'thumb') {
     if ($securityError) { http_response_code(403); die("Access Denied"); }
     if (!$reqFile) { http_response_code(400); die("No file specified"); }
@@ -136,30 +136,50 @@ if ($reqMode === 'thumb') {
     if ($fileName !== $reqFile) die("Invalid filename");
 
     $srcFile = $sourcePath . DIRECTORY_SEPARATOR . $fileName;
+
+    if (!file_exists($srcFile)) { http_response_code(404); die("Image not found"); }
+
+    // HASH GENERATION: We use the modification time of the original file
+    $mtime = filemtime($srcFile);
+    $hash = substr(md5($mtime), 0, 8); // 8 chars are enough for collision avoidance in versioning
     
-    // Zieldatei hat nun das Format als Endung angehängt (z.B. bild.jpg.avif)
-    // Das verhindert Konflikte und macht das Caching einfach
+    // Target file now contains the hash (e.g. image.jpg.a1b2c3d4.avif)
     $destExt = match($reqFmt) {
         'avif' => '.avif',
         'webp' => '.webp',
         default => '.jpg'
     };
     
-    $destFile = $thumbPathAbs . DIRECTORY_SEPARATOR . $fileName . $destExt;
-
-    if (!file_exists($srcFile)) { http_response_code(404); die("Image not found"); }
+    // New filename: Name + Hash + Extension
+    $destFileName = $fileName . '.' . $hash . $destExt;
+    $destFile = $thumbPathAbs . DIRECTORY_SEPARATOR . $destFileName;
 
     if (!is_dir($thumbPathAbs)) mkdir($thumbPathAbs, 0755, true);
 
-    $needsGeneration = false;
     if (!file_exists($destFile)) {
-        $needsGeneration = true;
-    } else {
-        if (filemtime($srcFile) > filemtime($destFile)) $needsGeneration = true;
-    }
+        // --- CLEANUP OLD VERSIONS ---
+        // Before generating the new image, delete old versions of this image (different hash, same format)
+        // We scan the directory because glob() can be tricky with special characters in filenames.
+        $dirHandle = opendir($thumbPathAbs);
+        if ($dirHandle) {
+            while (($file = readdir($dirHandle)) !== false) {
+                if ($file === '.' || $file === '..') continue;
+                
+                // Check: Does the name start with "OriginalName." and end with ".Format"?
+                // Format structure: $fileName . '.' . HASH . $destExt
+                $prefix = $fileName . '.';
+                
+                if (strpos($file, $prefix) === 0 && substr($file, -strlen($destExt)) === $destExt) {
+                    // It is a version of this image. Is it the current one?
+                    if ($file !== $destFileName) {
+                        @unlink($thumbPathAbs . DIRECTORY_SEPARATOR . $file);
+                    }
+                }
+            }
+            closedir($dirHandle);
+        }
 
-    if ($needsGeneration) {
-        // Qualität basierend auf Format wählen
+        // --- GENERATION ---
         $q = match($reqFmt) {
             'avif' => $thumbQualityAvif,
             'webp' => $thumbQualityWebp,
@@ -168,15 +188,14 @@ if ($reqMode === 'thumb') {
         
         $success = createThumbnail($srcFile, $destFile, $thumbWidth, $reqFmt, $q);
         
-        // Fallback: Wenn AVIF/WebP Generierung fehlschlägt (z.B. fehlende Lib zur Laufzeit), 
-        // versuchen wir JPG oder leiten um.
         if (!$success) {
+            // Fallback logic
             if ($reqFmt !== 'jpg') {
-                // Versuch auf JPG Fallback umzuleiten
-                 $fallbackUrl = "?mode=thumb&path=".urlencode($targetDir)."&file=".urlencode($fileName)."&fmt=jpg";
+                 $fallbackUrl = "?mode=thumb&path=".urlencode($targetDir)."&file=".urlencode($fileName)."&fmt=jpg&v=".$hash;
                  header("Location: $fallbackUrl");
                  exit;
             } else {
+                // If even JPG fails, deliver original
                 header("Location: " . $targetDir . '/' . $fileName);
                 exit;
             }
@@ -197,7 +216,8 @@ if ($reqMode === 'thumb') {
     header("Etag: $etag");
     header("Content-Type: $mime");
     header("Content-Length: " . filesize($destFile));
-    header("Cache-Control: public, max-age=31536000"); // 1 Jahr Cache, da Hash im Filename oder Etag
+    // Extremely long caching allowed because hash is in the filename
+    header("Cache-Control: public, max-age=31536000, immutable"); 
 
     if (isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) && strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) >= $lastMod) {
         header('HTTP/1.1 304 Not Modified');
@@ -208,7 +228,7 @@ if ($reqMode === 'thumb') {
     exit;
 }
 
-// --- LOGIK: CLEANUP (RECURSIVE) ---
+// --- LOGIC: CLEANUP (RECURSIVE) ---
 if ($reqMode === 'cleanup') {
     header('Content-Type: text/plain');
     if ($reqToken !== $cronSecret) die("Error: Invalid Token.");
@@ -219,15 +239,10 @@ if ($reqMode === 'cleanup') {
     
     $deletedCount = 0;
 
-    /**
-     * Recursive function to scan directories
-     */
     $recursiveClean = function($currentDir) use (&$recursiveClean, $thumbDirName, &$deletedCount) {
-        // Get files and directories
         $items = @scandir($currentDir);
         if (!$items) return;
 
-        // 1. Check if there is a thumbnails folder in the current directory
         if (in_array($thumbDirName, $items) && is_dir($currentDir . DIRECTORY_SEPARATOR . $thumbDirName)) {
             $tDir = $currentDir . DIRECTORY_SEPARATOR . $thumbDirName;
             $tFiles = scandir($tDir);
@@ -235,12 +250,13 @@ if ($reqMode === 'cleanup') {
             foreach ($tFiles as $tFile) {
                 if ($tFile === '.' || $tFile === '..') continue;
 
-                // Identify original file name (remove the added extension)
-                // e.g. "image.jpg.avif" -> "image.jpg"
-                $origName = preg_replace('/\.(avif|webp|jpg)$/', '', $tFile);
+                // Regex: Removes .HASH.EXT or just .EXT (for backward compatibility)
+                // Looks for dot, 8 hex chars, dot, format at the end
+                // OR just dot, format at the end
+                $origName = preg_replace('/(\.[a-f0-9]{8})?\.(avif|webp|jpg)$/', '', $tFile);
+                
                 $sourceFile = $currentDir . DIRECTORY_SEPARATOR . $origName;
 
-                // If the source file does not exist, delete the thumbnail
                 if (!file_exists($sourceFile)) {
                     $fullTPath = $tDir . DIRECTORY_SEPARATOR . $tFile;
                     if (@unlink($fullTPath)) {
@@ -251,20 +267,15 @@ if ($reqMode === 'cleanup') {
             }
         }
 
-        // 2. Dive deeper into subdirectories
         foreach ($items as $item) {
             if ($item === '.' || $item === '..' || $item === $thumbDirName) continue;
-            
             $fullPath = $currentDir . DIRECTORY_SEPARATOR . $item;
-            
-            // Only follow directories
             if (is_dir($fullPath)) {
                 $recursiveClean($fullPath);
             }
         }
     };
 
-    // Run the function starting at source path
     $recursiveClean($sourcePath);
 
     echo "\n--- Cleanup Finished ---\n";
@@ -272,7 +283,7 @@ if ($reqMode === 'cleanup') {
     exit;
 }
 
-// --- LOGIK: DOWNLOAD ---
+// --- LOGIC: DOWNLOAD ---
 if ($reqMode === 'download') {
     if ($securityError) die($securityError);
     if (!class_exists('ZipArchive')) die("ZipArchive missing");
@@ -294,7 +305,7 @@ if ($reqMode === 'download') {
     exit;
 }
 
-// --- LOGIK: VIEW ---
+// --- LOGIC: VIEW ---
 if ($securityError) die($securityError);
 
 $images = [];
@@ -327,9 +338,12 @@ if (is_dir($sourcePath)) {
             $w = $dims[0];
             $h = $dims[1];
             $tH = floor($thumbWidth * ($h / $w));
+            
+            // Hash for URL generation (Cache Busting)
+            $fileHash = substr(md5($fInfo['time']), 0, 8);
 
-            // Basis URL für Thumbnails
-            $thumbBase = '?mode=thumb&path=' . urlencode($targetDir) . '&file=' . urlencode($file);
+            // Base URL with version hash
+            $thumbBase = '?mode=thumb&path=' . urlencode($targetDir) . '&file=' . urlencode($file) . '&v=' . $fileHash;
 
             $images[] = [
                 'src' => $targetDir . '/' . $file,
@@ -338,7 +352,6 @@ if (is_dir($sourcePath)) {
                 'thumb_w' => $thumbWidth,
                 'thumb_h' => $tH,
                 'name' => $file,
-                // URLs für die verschiedenen Formate
                 'thumb_jpg'  => $thumbBase . '&fmt=jpg',
                 'thumb_webp' => $thumbBase . '&fmt=webp',
                 'thumb_avif' => $thumbBase . '&fmt=avif'
@@ -407,7 +420,7 @@ if (is_dir($sourcePath)) {
         }
         .btn-download:hover { color: var(--color-primary); }
 
-        /* Grid Optimierungen */
+        /* Grid Optimizations */
         .gallery-grid {
             max-width: 1600px; margin: 40px auto 0;
             column-count: 4; column-gap: 20px;
@@ -429,7 +442,7 @@ if (is_dir($sourcePath)) {
             border-color: var(--color-primary);
         }
         
-        /* WICHTIG: Picture Tag Styling */
+        /* IMPORTANT: Picture Tag Styling */
         .gallery-item picture {
             display: block; width: 100%; height: auto;
         }
@@ -511,7 +524,7 @@ if (is_dir($sourcePath)) {
             pswpModule: PhotoSwipe
         });
         
-        // Download Button (Unverändert)
+        // Download Button (Unchanged)
         lightbox.on('uiRegister', function() {
             lightbox.pswp.ui.registerElement({
                 name: 'download-button',

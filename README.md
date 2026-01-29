@@ -13,10 +13,11 @@ The script implements a sophisticated image delivery strategy that prioritizes m
 * **Smart Fallback Logic:** If the server's GD library fails to generate a specific high-efficiency format (e.g., missing AVIF support), the script automatically redirects to a JPEG fallback to ensure the UI never breaks.
 * **Server Capability Detection:** It performs real-time checks for `imageavif` and `imagewebp` support to conditionally render the appropriate frontend source tags.
 
-### 2. Performance & Cache Architecture
-* **HTTP Optimization:** Fully supports `Last-Modified` and `Etag` headers. It validates requests against `HTTP_IF_MODIFIED_SINCE` to return `304 Not Modified` status codes, significantly reducing server load.
-* **Long-Term Caching:** Served thumbnails include a `Cache-Control` header set to one year (`max-age=31536000`).
+### 2. Intelligent Caching & Versioning (v1.9)
+* **Hash-Based Cache Busting:** Thumbnail filenames now include an 8-character hash derived from the source file's modification time (e.g., `image.jpg.a1b2c3d4.avif`). If you replace a source image, the hash changes, instantly invalidating the old cache.
+* **Immutable Caching:** Because filenames change with content, responses include the `immutable` directive (`Cache-Control: public, max-age=31536000, immutable`). This allows browsers to serve images from disk cache without ever re-validating with the server, maximizing performance.
 * **Lazy Loading:** Native `loading="lazy"` attributes are applied to the grid, ensuring fast initial page paint times even for large galleries.
+* **Auto-Stale Cleanup:** When a new version of a thumbnail is generated (due to a changed source file), the script automatically detects and deletes previous/stale versions of that specific image to prevent disk clutter.
 
 ### 3. Frontend Implementation
 * **PhotoSwipe 5 Integration:** Leverages the latest ESM (ECMAScript Modules) version of PhotoSwipe, loaded via CDN to eliminate local asset management.
@@ -25,7 +26,7 @@ The script implements a sophisticated image delivery strategy that prioritizes m
 
 ### 4. Security & Maintenance Tools
 * **Directory Traversal Protection:** Sanitizes all input paths by stripping `..` and null bytes, then validating the result against `realpath` to ensure access remains within the defined base directory.
-* **Maintenance CLI/Web Mode:** Includes a `cleanup` mode (protected by a `$cronSecret`) to remove orphaned thumbnails. It cross-references existing thumbnails against their source files to keep storage lean.
+* **Maintenance CLI/Web Mode:** Includes a `cleanup` mode (protected by a `$cronSecret`) to remove orphaned thumbnails. It uses regex matching to handle hashed filenames, ensuring that thumbnails with no matching source file are deleted.
 * **Instant ZIP Archiving:** Uses the `ZipArchive` class to bundle gallery contents into a downloadable archive on demand.
 
 ---
