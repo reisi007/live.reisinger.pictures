@@ -1,7 +1,7 @@
 <?php
 /**
  * Single File PHP PhotoSwipe Gallery (Next-Gen Formats: AVIF/WebP + Picture Tag)
- * * Version: 1.7
+ * * Version: 1.8 (Recursive Cleanup)
  */
 
 // --- Konfiguration (Defaults) ---
@@ -11,7 +11,7 @@ $thumbWidth = 500;             // Breite für Masonry Grid
 $thumbQualityJpg = 75;         // Qualität JPEG (0-100)
 $thumbQualityWebp = 75;        // Qualität WebP (0-100)
 $thumbQualityAvif = 45;        // Qualität AVIF (0-100, AVIF ist bei niedrigeren Werten effizienter)
-$cronSecret = 'MySecretKey123'; 
+$cronSecret = 'MySecretKey123';
 
 // Dateifilter
 $ignoredFiles = ['.', '..', 'index.php', $thumbDirName, '.DS_Store', 'Thumbs.db'];
@@ -208,41 +208,71 @@ if ($reqMode === 'thumb') {
     exit;
 }
 
-// --- LOGIK: CLEANUP / DOWNLOAD (Unverändert, aber der Vollständigkeit halber) ---
+// --- LOGIK: CLEANUP (RECURSIVE) ---
 if ($reqMode === 'cleanup') {
-    // ... (Cleanup muss nun auch .avif und .webp löschen können)
     header('Content-Type: text/plain');
     if ($reqToken !== $cronSecret) die("Error: Invalid Token.");
     if ($securityError) die("Error: Security Violation.");
-    echo "--- Cleanup /$targetDir ---\n";
-    if (is_dir($thumbPathAbs)) {
-        $thumbFiles = scandir($thumbPathAbs);
-        foreach ($thumbFiles as $tFile) {
-            if ($tFile === '.' || $tFile === '..') continue;
-            // Wir müssen die Originalendung extrahieren (z.B. bild.jpg aus bild.jpg.avif)
-            // Einfacher Hack: Alles nach dem letzten Punkt entfernen und prüfen
-            $origName = preg_replace('/\.(avif|webp|jpg)$/', '', $tFile);
-            
-            // Wenn der Name immer noch Extensions hat (bild.jpg), ist es ok. 
-            // Aber Vorsicht bei bild.jpg (Thumbnail) vs bild.jpg (Original). 
-            // Unsere Logik: Original heisst bild.jpg. Thumbnail heisst bild.jpg.jpg
-            
-            // Bessere Logik: Prüfe ob eine Datei im Source Dir existiert, die zum Thumb passt
-            // Da wir einfach .ext anhängen, entfernen wir die letzte ext.
-            $potentialSource = $sourcePath . DIRECTORY_SEPARATOR . $origName;
-            
-            if (!file_exists($potentialSource)) {
-                // Könnte auch altes Naming Schema sein? 
-                // Um sicher zu gehen: Wenn Original nicht da, weg damit.
-                if (unlink($thumbPathAbs . DIRECTORY_SEPARATOR . $tFile)) {
-                    echo "Deleted: $tFile\n";
+
+    echo "--- Starting Recursive Cleanup ---\n";
+    echo "Root Directory: $sourcePath\n";
+    
+    $deletedCount = 0;
+
+    /**
+     * Recursive function to scan directories
+     */
+    $recursiveClean = function($currentDir) use (&$recursiveClean, $thumbDirName, &$deletedCount) {
+        // Get files and directories
+        $items = @scandir($currentDir);
+        if (!$items) return;
+
+        // 1. Check if there is a thumbnails folder in the current directory
+        if (in_array($thumbDirName, $items) && is_dir($currentDir . DIRECTORY_SEPARATOR . $thumbDirName)) {
+            $tDir = $currentDir . DIRECTORY_SEPARATOR . $thumbDirName;
+            $tFiles = scandir($tDir);
+
+            foreach ($tFiles as $tFile) {
+                if ($tFile === '.' || $tFile === '..') continue;
+
+                // Identify original file name (remove the added extension)
+                // e.g. "image.jpg.avif" -> "image.jpg"
+                $origName = preg_replace('/\.(avif|webp|jpg)$/', '', $tFile);
+                $sourceFile = $currentDir . DIRECTORY_SEPARATOR . $origName;
+
+                // If the source file does not exist, delete the thumbnail
+                if (!file_exists($sourceFile)) {
+                    $fullTPath = $tDir . DIRECTORY_SEPARATOR . $tFile;
+                    if (@unlink($fullTPath)) {
+                        echo "Deleted orphaned: " . $origName . " (" . $tFile . ")\n";
+                        $deletedCount++;
+                    }
                 }
             }
         }
-    }
+
+        // 2. Dive deeper into subdirectories
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..' || $item === $thumbDirName) continue;
+            
+            $fullPath = $currentDir . DIRECTORY_SEPARATOR . $item;
+            
+            // Only follow directories
+            if (is_dir($fullPath)) {
+                $recursiveClean($fullPath);
+            }
+        }
+    };
+
+    // Run the function starting at source path
+    $recursiveClean($sourcePath);
+
+    echo "\n--- Cleanup Finished ---\n";
+    echo "Total files deleted: $deletedCount\n";
     exit;
 }
 
+// --- LOGIK: DOWNLOAD ---
 if ($reqMode === 'download') {
     if ($securityError) die($securityError);
     if (!class_exists('ZipArchive')) die("ZipArchive missing");
