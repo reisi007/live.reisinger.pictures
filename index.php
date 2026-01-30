@@ -367,6 +367,7 @@ if (is_dir($sourcePath)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, follow">
     <title>reisinger.pictures</title>
     <link rel="icon" href="https://reisinger.pictures/favicon-32x32.png" type="image/png">
     
