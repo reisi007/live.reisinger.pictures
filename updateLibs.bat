@@ -1,53 +1,53 @@
 @echo off
 :: ---------------------------------------------------------
-:: KONFIGURATION
+:: CONFIGURATION
 :: ---------------------------------------------------------
 
-:: Die gewünschte Version von PhotoSwipe
+:: The desired version of PhotoSwipe
 set "VERSION=5.4"
 
-:: Zielordner in deinem Projekt (bitte an deine Struktur anpassen)
-:: "." bedeutet aktuelles Verzeichnis
+:: Target folders in your project 
 set "JS_ZIEL=.\assets\js\photoswipe"
 set "CSS_ZIEL=.\assets\css\photoswipe"
 
-:: Basis-URL von unpkg
+:: Base URL from unpkg
 set "BASE_URL=https://unpkg.com/photoswipe@%VERSION%/dist"
 
 :: ---------------------------------------------------------
-:: START DES DOWNLOADS
+:: START DOWNLOAD
 :: ---------------------------------------------------------
 echo.
-echo Starte Download von PhotoSwipe Version %VERSION%...
+echo Starting download of PhotoSwipe (Minified) version %VERSION%... 
 echo.
 
-:: 1. Ordner erstellen, falls sie nicht existieren
+:: 1. Create directories if they do not exist
 if not exist "%JS_ZIEL%" (
-    echo Erstelle Verzeichnis: %JS_ZIEL%
+    echo Creating directory: %JS_ZIEL% 
     mkdir "%JS_ZIEL%"
 )
 
 if not exist "%CSS_ZIEL%" (
-    echo Erstelle Verzeichnis: %CSS_ZIEL%
+    echo Creating directory: %CSS_ZIEL% 
     mkdir "%CSS_ZIEL%"
 )
 
-:: 2. JavaScript Dateien herunterladen
-echo Lade JavaScript Dateien...
+:: 2. Download JavaScript files (Minified)
+echo Downloading minified JavaScript files...
 
-:: Hauptdatei
-curl -L -o "%JS_ZIEL%\photoswipe.esm.js" "%BASE_URL%/photoswipe.esm.js"
-:: Lightbox Datei (wird meistens auch benötigt)
-curl -L -o "%JS_ZIEL%\photoswipe-lightbox.esm.js" "%BASE_URL%/photoswipe-lightbox.esm.js"
+:: Core file (minified)
+curl -L -o "%JS_ZIEL%\photoswipe.esm.min.js" "%BASE_URL%/photoswipe.esm.min.js"
 
-:: 3. CSS Datei herunterladen
-echo Lade CSS Datei...
+:: Lightbox file (minified)
+curl -L -o "%JS_ZIEL%\photoswipe-lightbox.esm.min.js" "%BASE_URL%/photoswipe-lightbox.esm.min.js"
+
+:: 3. Download CSS file
+echo Downloading CSS file...
 curl -L -o "%CSS_ZIEL%\photoswipe.css" "%BASE_URL%/photoswipe.css"
 
 echo.
-echo ---------------------------------------------------------
-echo FERTIG!
-echo Die Dateien wurden erfolgreich heruntergeladen.
-echo Du kannst sie nun lokal in deiner PHP-Datei einbinden.
-echo ---------------------------------------------------------
+echo --------------------------------------------------------- 
+echo DONE! 
+echo The minified files have been downloaded successfully. 
+echo You can now include them locally in your PHP/HTML files. 
+echo --------------------------------------------------------- 
 pause

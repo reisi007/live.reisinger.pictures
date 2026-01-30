@@ -520,8 +520,8 @@ if (is_dir($sourcePath)) {
 
     <script type="module">
         // CHANGE: Local JS files (imported from assets folder)
-        import PhotoSwipeLightbox from './assets/js/photoswipe/photoswipe-lightbox.esm.js';
-        import PhotoSwipe from './assets/js/photoswipe/photoswipe.esm.js';
+        import PhotoSwipeLightbox from './assets/js/photoswipe/photoswipe-lightbox.esm.min.js';
+        import PhotoSwipe from './assets/js/photoswipe/photoswipe.esm.min.js';
 
         const lightbox = new PhotoSwipeLightbox({
             gallery: '#my-gallery',
