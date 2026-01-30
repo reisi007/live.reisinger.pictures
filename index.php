@@ -1,7 +1,7 @@
 <?php
 /**
  * Single File PHP PhotoSwipe Gallery (Next-Gen Formats: AVIF/WebP + Picture Tag)
- * * Version: 1.9 (Hash-based Caching & Stale Cleanup)
+ * * Version: 2.0 (Self-Hosted / GDPR Compliant)
  */
 
 // --- Configuration (Defaults) ---
@@ -11,7 +11,9 @@ $thumbWidth = 500;             // Width for Masonry Grid
 $thumbQualityJpg = 75;         // JPEG Quality (0-100)
 $thumbQualityWebp = 75;        // WebP Quality (0-100)
 $thumbQualityAvif = 45;        // AVIF Quality (0-100, AVIF is more efficient at lower values)
-$cronSecret = 'dhfdjshfjhdsfhkjsdhfjh';
+
+// SECURITY: Change this token to something random!
+$cronSecret = 'PLEASE_CHANGE_THIS_SECRET_TOKEN';
 
 // File filters
 $ignoredFiles = ['.', '..', 'index.php', $thumbDirName, '.DS_Store', 'Thumbs.db'];
@@ -367,7 +369,8 @@ if (is_dir($sourcePath)) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>reisinger.pictures</title>
     <link rel="icon" href="https://reisinger.pictures/favicon-32x32.png" type="image/png">
-    <link rel="stylesheet" href="https://unpkg.com/photoswipe@5.4.3/dist/photoswipe.css">
+    
+    <link rel="stylesheet" href="assets/css/photoswipe/photoswipe.css">
 
     <style>
         :root {
@@ -515,8 +518,9 @@ if (is_dir($sourcePath)) {
     </div>
 
     <script type="module">
-        import PhotoSwipeLightbox from 'https://unpkg.com/photoswipe@5.4/dist/photoswipe-lightbox.esm.js';
-        import PhotoSwipe from 'https://unpkg.com/photoswipe@5.4/dist/photoswipe.esm.js';
+        // CHANGE: Local JS files (imported from assets folder)
+        import PhotoSwipeLightbox from './assets/js/photoswipe/photoswipe-lightbox.esm.js';
+        import PhotoSwipe from './assets/js/photoswipe/photoswipe.esm.js';
 
         const lightbox = new PhotoSwipeLightbox({
             gallery: '#my-gallery',
