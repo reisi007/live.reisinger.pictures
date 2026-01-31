@@ -2,6 +2,6 @@
     "name": "reisi007/live.reisinger.pictures",
     "description": "Simple PHP Gallery with Streaming ZIP Download",
     "require": {
-        "maennchen/zipstream-php": "^3.1"
+        "maennchen/zipstream-php": "^3.2"
     }
 }

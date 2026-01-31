@@ -1,16 +1,17 @@
 <?php
 /**
  * Single File PHP PhotoSwipe Gallery (Next-Gen Formats: AVIF/WebP + Picture Tag)
- * * Version: 2.1 (Streaming Download)
+ * * Version: 2.2 (Auto-Format Negotiation & Lightbox Optimization)
  */
 
 // --- Configuration (Defaults) ---
 $defaultDir = 'gallery';       // Default folder
 $thumbDirName = '_thumbnails'; // Folder name for thumbnails
-$thumbWidth = 500;             // Width for Masonry Grid
+$thumbWidth = 500;             // Width for Grid Thumbnails
+$lightboxWidth = 1920;         // Width for Lightbox (Full Screen) View
 $thumbQualityJpg = 75;         // JPEG Quality (0-100)
 $thumbQualityWebp = 75;        // WebP Quality (0-100)
-$thumbQualityAvif = 45;        // AVIF Quality (0-100, AVIF is more efficient at lower values)
+$thumbQualityAvif = 45;        // AVIF Quality (0-100)
 
 // SECURITY: Change this token to something random!
 $cronSecret = 'PLEASE_CHANGE_THIS_SECRET_TOKEN';
@@ -65,7 +66,6 @@ if (!function_exists('createThumbnail')) {
         // Write target format
         switch ($format) {
             case 'avif':
-                // AVIF often requires PHP 8.1+ and a current GD Lib
                 if (function_exists('imageavif')) {
                     $result = imageavif($thumbnail, $dest, $quality); 
                 }
@@ -94,7 +94,8 @@ $reqMode = null;
 $reqToken = null; 
 $reqPathInput = null; 
 $reqFile = null;
-$reqFmt = 'jpg'; // Default Format Request
+$reqFmt = 'auto'; // Default to auto
+$reqWidth = $thumbWidth; // Default to thumb width
 
 if ($isCli) {
     foreach ($argv as $arg) {
@@ -107,7 +108,12 @@ if ($isCli) {
     $reqToken = isset($_GET['token']) ? $_GET['token'] : null;
     $reqPathInput = isset($_GET['path']) ? $_GET['path'] : null;
     $reqFile = isset($_GET['file']) ? $_GET['file'] : null;
-    $reqFmt = isset($_GET['fmt']) ? $_GET['fmt'] : 'jpg';
+    $reqFmt = isset($_GET['fmt']) ? $_GET['fmt'] : 'auto';
+    // Allow width override, but cap it for safety
+    if (isset($_GET['w'])) {
+        $w = intval($_GET['w']);
+        if ($w > 0 && $w <= 3000) $reqWidth = $w;
+    }
 }
 
 // Sanitize path
@@ -141,40 +147,56 @@ if ($reqMode === 'thumb') {
 
     if (!file_exists($srcFile)) { http_response_code(404); die("Image not found"); }
 
-    // HASH GENERATION: We use the modification time of the original file
+    // --- SMART FORMAT NEGOTIATION (fmt=auto) ---
+    // If 'auto' is requested, we check the Accept header to serve the best possible format
+    if ($reqFmt === 'auto') {
+        $accept = isset($_SERVER['HTTP_ACCEPT']) ? $_SERVER['HTTP_ACCEPT'] : '';
+        if ($canAvif && strpos($accept, 'image/avif') !== false) {
+            $reqFmt = 'avif';
+        } elseif ($canWebp && strpos($accept, 'image/webp') !== false) {
+            $reqFmt = 'webp';
+        } else {
+            $reqFmt = 'jpg';
+        }
+        // Critical for caching: tell browsers/proxies that the result depends on the Accept header
+        header("Vary: Accept");
+    }
+
+    // HASH GENERATION: Use modification time
     $mtime = filemtime($srcFile);
-    $hash = substr(md5($mtime), 0, 8); // 8 chars are enough for collision avoidance in versioning
+    $hash = substr(md5($mtime), 0, 8); 
     
-    // Target file now contains the hash (e.g. image.jpg.a1b2c3d4.avif)
+    // Determine extension
     $destExt = match($reqFmt) {
         'avif' => '.avif',
         'webp' => '.webp',
         default => '.jpg'
     };
     
-    // New filename: Name + Hash + Extension
-    $destFileName = $fileName . '.' . $hash . $destExt;
+    // New filename structure: Name . Hash . Width . Extension
+    // Example: image.jpg.a1b2c3d4.w500.webp
+    $destFileName = $fileName . '.' . $hash . '.w' . $reqWidth . $destExt;
     $destFile = $thumbPathAbs . DIRECTORY_SEPARATOR . $destFileName;
 
     if (!is_dir($thumbPathAbs)) mkdir($thumbPathAbs, 0755, true);
 
     if (!file_exists($destFile)) {
         // --- CLEANUP OLD VERSIONS ---
-        // Before generating the new image, delete old versions of this image (different hash, same format)
-        // We scan the directory because glob() can be tricky with special characters in filenames.
+        // Cleanup logic to remove old versions of this specific size/file
         $dirHandle = opendir($thumbPathAbs);
         if ($dirHandle) {
             while (($file = readdir($dirHandle)) !== false) {
                 if ($file === '.' || $file === '..') continue;
                 
-                // Check: Does the name start with "OriginalName." and end with ".Format"?
-                // Format structure: $fileName . '.' . HASH . $destExt
-                $prefix = $fileName . '.';
-                
-                if (strpos($file, $prefix) === 0 && substr($file, -strlen($destExt)) === $destExt) {
-                    // It is a version of this image. Is it the current one?
-                    if ($file !== $destFileName) {
-                        @unlink($thumbPathAbs . DIRECTORY_SEPARATOR . $file);
+                // Check prefix match
+                if (strpos($file, $fileName . '.') === 0) {
+                    // Check if it matches our width tag
+                    if (strpos($file, '.w' . $reqWidth . '.') !== false) {
+                         // It is this file at this width.
+                         // If it's not the exact new filename (implies different hash/ext), delete it.
+                         if ($file !== $destFileName) {
+                             @unlink($thumbPathAbs . DIRECTORY_SEPARATOR . $file);
+                         }
                     }
                 }
             }
@@ -188,16 +210,16 @@ if ($reqMode === 'thumb') {
             default => $thumbQualityJpg
         };
         
-        $success = createThumbnail($srcFile, $destFile, $thumbWidth, $reqFmt, $q);
+        $success = createThumbnail($srcFile, $destFile, $reqWidth, $reqFmt, $q);
         
         if (!$success) {
-            // Fallback logic
+            // Fallback: If AVIF/WebP fails, try JPG
             if ($reqFmt !== 'jpg') {
-                 $fallbackUrl = "?mode=thumb&path=".urlencode($targetDir)."&file=".urlencode($fileName)."&fmt=jpg&v=".$hash;
+                 // Recursively try to load JPG version
+                 $fallbackUrl = "?mode=thumb&path=".urlencode($targetDir)."&file=".urlencode($fileName)."&w=$reqWidth&fmt=jpg&v=".$hash;
                  header("Location: $fallbackUrl");
                  exit;
             } else {
-                // If even JPG fails, deliver original
                 header("Location: " . $targetDir . '/' . $fileName);
                 exit;
             }
@@ -218,7 +240,6 @@ if ($reqMode === 'thumb') {
     header("Etag: $etag");
     header("Content-Type: $mime");
     header("Content-Length: " . filesize($destFile));
-    // Extremely long caching allowed because hash is in the filename
     header("Cache-Control: public, max-age=31536000, immutable"); 
 
     if (isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) && strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) >= $lastMod) {
@@ -252,10 +273,10 @@ if ($reqMode === 'cleanup') {
             foreach ($tFiles as $tFile) {
                 if ($tFile === '.' || $tFile === '..') continue;
 
-                // Regex: Removes .HASH.EXT or just .EXT (for backward compatibility)
-                // Looks for dot, 8 hex chars, dot, format at the end
-                // OR just dot, format at the end
-                $origName = preg_replace('/(\.[a-f0-9]{8})?\.(avif|webp|jpg)$/', '', $tFile);
+                // Regex: Matches filename.hash.width.ext
+                // e.g. image.jpg.a1b2c3d4.w500.webp
+                // Removes everything from the first dot of the hash onwards
+                $origName = preg_replace('/(\.[a-f0-9]{8})(\.w\d+)?\.(avif|webp|jpg)$/', '', $tFile);
                 
                 $sourceFile = $currentDir . DIRECTORY_SEPARATOR . $origName;
 
@@ -289,7 +310,6 @@ if ($reqMode === 'cleanup') {
 if ($reqMode === 'download') {
     if ($securityError) die($securityError);
 
-    // Require Composer Autoloader for ZipStream
     if (file_exists(__DIR__ . '/vendor/autoload.php')) {
         require_once __DIR__ . '/vendor/autoload.php';
     } else {
@@ -298,8 +318,6 @@ if ($reqMode === 'download') {
 
     $zipName = 'gallery.zip';
 
-    // Initialize ZipStream
-    // "sendHttpHeaders: true" handles Content-Type and Disposition automatically
     try {
         $zip = new \ZipStream\ZipStream(
             outputName: $zipName,
@@ -308,18 +326,13 @@ if ($reqMode === 'download') {
 
         foreach (scandir($sourcePath) as $f) {
             if (in_array($f, $ignoredFiles)) continue;
-            
             $filePath = $sourcePath . DIRECTORY_SEPARATOR . $f;
-            
-            // Only add actual files to the archive
             if (is_file($filePath)) {
                 $zip->addFileFromPath($f, $filePath);
             }
         }
-
         $zip->finish();
     } catch (Exception $e) {
-        // In case of streaming error (though headers might have already been sent)
         error_log("ZipStream Error: " . $e->getMessage());
     }
     exit;
@@ -357,21 +370,36 @@ if (is_dir($sourcePath)) {
         if ($dims) {
             $w = $dims[0];
             $h = $dims[1];
+            
+            // Thumbnail dimensions
             $tH = floor($thumbWidth * ($h / $w));
             
-            // Hash for URL generation (Cache Busting)
+            // Lightbox dimensions (resized to fit $lightboxWidth)
+            // If original is smaller than lightboxWidth, use original dims
+            $fullW = ($w > $lightboxWidth) ? $lightboxWidth : $w;
+            $fullH = floor($fullW * ($h / $w));
+
+            // Hash
             $fileHash = substr(md5($fInfo['time']), 0, 8);
 
-            // Base URL with version hash
-            $thumbBase = '?mode=thumb&path=' . urlencode($targetDir) . '&file=' . urlencode($file) . '&v=' . $fileHash;
+            // Base URL parameters
+            $urlParams = '?path=' . urlencode($targetDir) . '&file=' . urlencode($file) . '&v=' . $fileHash;
+
+            // Thumbnail URLs (Fixed Sizes)
+            $thumbBase = $urlParams . '&mode=thumb&w=' . $thumbWidth;
+            
+            // Lightbox URL (Auto Format, High Res)
+            // We use default auto behavior so PHP decides based on browser support (AVIF > WebP > JPG)
+            $lightboxUrl = $urlParams . '&mode=thumb&w=' . $fullW;
 
             $images[] = [
-                'src' => $targetDir . '/' . $file,
-                'w' => $w,
-                'h' => $h,
+                'name' => $file,
+                'orig_src' => $targetDir . '/' . $file, // Direct link to original for download
+                'lightbox_src' => $lightboxUrl,
+                'w' => $fullW,
+                'h' => $fullH,
                 'thumb_w' => $thumbWidth,
                 'thumb_h' => $tH,
-                'name' => $file,
                 'thumb_jpg'  => $thumbBase . '&fmt=jpg',
                 'thumb_webp' => $thumbBase . '&fmt=webp',
                 'thumb_avif' => $thumbBase . '&fmt=avif'
@@ -498,10 +526,16 @@ if (is_dir($sourcePath)) {
 
     <div class="gallery-grid" id="my-gallery">
         <?php foreach ($images as $img): ?>
-            <a href="<?php echo htmlspecialchars($img['src']); ?>"
+            <!-- 
+                LIGHTBOX LINK:
+                Points to the "auto" formatted high-res image.
+                data-original-src stores the direct path to the raw file for downloading.
+            -->
+            <a href="<?php echo htmlspecialchars($img['lightbox_src']); ?>"
                class="gallery-item"
                data-pswp-width="<?php echo $img['w']; ?>"
                data-pswp-height="<?php echo $img['h']; ?>"
+               data-original-src="<?php echo htmlspecialchars($img['orig_src']); ?>"
                target="_blank">
                
                <picture>
@@ -537,7 +571,6 @@ if (is_dir($sourcePath)) {
     </div>
 
     <script type="module">
-        // CHANGE: Local JS files (imported from assets folder)
         import PhotoSwipeLightbox from './assets/js/photoswipe/photoswipe-lightbox.esm.min.js';
         import PhotoSwipe from './assets/js/photoswipe/photoswipe.esm.min.js';
 
@@ -547,7 +580,7 @@ if (is_dir($sourcePath)) {
             pswpModule: PhotoSwipe
         });
         
-        // Download Button (Unchanged)
+        // Download Button (Updated to prefer original source)
         lightbox.on('uiRegister', function() {
             lightbox.pswp.ui.registerElement({
                 name: 'download-button',
@@ -564,7 +597,13 @@ if (is_dir($sourcePath)) {
                     el.title = "Download";
                     pswp.on('change', () => {
                         const currSlide = pswp.currSlide;
-                        if (currSlide) el.href = currSlide.data.src;
+                        if (currSlide && currSlide.data.element) {
+                            // Try to get data-original-src from the DOM element
+                            const orig = currSlide.data.element.getAttribute('data-original-src');
+                            el.href = orig ? orig : currSlide.data.src;
+                        } else if (currSlide) {
+                            el.href = currSlide.data.src;
+                        }
                     });
                 }
             });
