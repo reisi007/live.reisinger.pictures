@@ -1,7 +1,7 @@
 <?php
 /**
  * Single File PHP PhotoSwipe Gallery (Next-Gen Formats: AVIF/WebP + Picture Tag)
- * * Version: 2.0 (Self-Hosted / GDPR Compliant)
+ * * Version: 2.1 (Streaming Download)
  */
 
 // --- Configuration (Defaults) ---
@@ -285,25 +285,43 @@ if ($reqMode === 'cleanup') {
     exit;
 }
 
-// --- LOGIC: DOWNLOAD ---
+// --- LOGIC: DOWNLOAD (STREAMING) ---
 if ($reqMode === 'download') {
     if ($securityError) die($securityError);
-    if (!class_exists('ZipArchive')) die("ZipArchive missing");
-    $zipName = 'gallery.zip';
-    $tempZip = tempnam(sys_get_temp_dir(), 'zip');
-    $zip = new ZipArchive();
-    $zip->open($tempZip, ZipArchive::CREATE);
-    foreach (scandir($sourcePath) as $f) {
-        if(in_array($f, $ignoredFiles)) continue;
-        $fp = $sourcePath.'/'.$f;
-        if(is_file($fp)) $zip->addFile($fp, $f);
+
+    // Require Composer Autoloader for ZipStream
+    if (file_exists(__DIR__ . '/vendor/autoload.php')) {
+        require_once __DIR__ . '/vendor/autoload.php';
+    } else {
+        die("Error: Vendor missing. Please run 'composer install' to enable streaming downloads.");
     }
-    $zip->close();
-    header('Content-Type: application/zip');
-    header('Content-Disposition: attachment; filename="'.$zipName.'"');
-    header('Content-Length: '.filesize($tempZip));
-    readfile($tempZip);
-    unlink($tempZip);
+
+    $zipName = 'gallery.zip';
+
+    // Initialize ZipStream
+    // "sendHttpHeaders: true" handles Content-Type and Disposition automatically
+    try {
+        $zip = new \ZipStream\ZipStream(
+            outputName: $zipName,
+            sendHttpHeaders: true
+        );
+
+        foreach (scandir($sourcePath) as $f) {
+            if (in_array($f, $ignoredFiles)) continue;
+            
+            $filePath = $sourcePath . DIRECTORY_SEPARATOR . $f;
+            
+            // Only add actual files to the archive
+            if (is_file($filePath)) {
+                $zip->addFileFromPath($f, $filePath);
+            }
+        }
+
+        $zip->finish();
+    } catch (Exception $e) {
+        // In case of streaming error (though headers might have already been sent)
+        error_log("ZipStream Error: " . $e->getMessage());
+    }
     exit;
 }
 
