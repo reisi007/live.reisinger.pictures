@@ -1,7 +1,7 @@
 <?php
 /**
  * Single File PHP PhotoSwipe Gallery (Next-Gen Formats: AVIF/WebP + Picture Tag)
- * * Version: 2.2 (Auto-Format Negotiation & Lightbox Optimization)
+ * * Version: 2.6 (Live Updates + Secure ZIP + Clean URLs)
  */
 
 // --- Configuration (Defaults) ---
@@ -13,6 +13,9 @@ $thumbQualityJpg = 75;         // JPEG Quality (0-100)
 $thumbQualityWebp = 75;        // WebP Quality (0-100)
 $thumbQualityAvif = 45;        // AVIF Quality (0-100)
 
+// --- CORRUPTION HANDLING ---
+$deleteCorruptedFiles = false; 
+
 // SECURITY: Change this token to something random!
 $cronSecret = 'PLEASE_CHANGE_THIS_SECRET_TOKEN';
 
@@ -21,11 +24,10 @@ $ignoredFiles = ['.', '..', 'index.php', $thumbDirName, '.DS_Store', 'Thumbs.db'
 $validExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 
 // --- CAPABILITY CHECK ---
-// Check once what the server supports
 $canAvif = function_exists('imageavif');
 $canWebp = function_exists('imagewebp');
 
-// --- GLOBAL HELPER FUNCTION ---
+// --- GLOBAL HELPER FUNCTIONS ---
 if (!function_exists('createThumbnail')) {
     function createThumbnail($src, $dest, $targetWidth, $format, $quality) {
         if (!file_exists($src)) return false;
@@ -63,21 +65,16 @@ if (!function_exists('createThumbnail')) {
 
         $result = false;
         
-        // Write target format
         switch ($format) {
             case 'avif':
-                if (function_exists('imageavif')) {
-                    $result = imageavif($thumbnail, $dest, $quality); 
-                }
+                if (function_exists('imageavif')) $result = imageavif($thumbnail, $dest, $quality); 
                 break;
             case 'webp':
-                if (function_exists('imagewebp')) {
-                    $result = imagewebp($thumbnail, $dest, $quality);
-                }
+                if (function_exists('imagewebp')) $result = imagewebp($thumbnail, $dest, $quality);
                 break;
             case 'jpg':
             default:
-                imageinterlace($thumbnail, true); // Progressive JPEG
+                imageinterlace($thumbnail, true); 
                 $result = imagejpeg($thumbnail, $dest, $quality);
                 break;
         }
@@ -88,14 +85,25 @@ if (!function_exists('createThumbnail')) {
     }
 }
 
+if (!function_exists('isJpegIntegrityOk')) {
+    function isJpegIntegrityOk($path) {
+        $f = @fopen($path, 'rb');
+        if (!$f) return false;
+        if (fseek($f, -2, SEEK_END) === -1) { fclose($f); return false; }
+        $data = fread($f, 2);
+        fclose($f);
+        return ($data === "\xFF\xD9");
+    }
+}
+
 // --- INPUT HANDLING ---
 $isCli = (php_sapi_name() === 'cli');
 $reqMode = null; 
 $reqToken = null; 
 $reqPathInput = null; 
 $reqFile = null;
-$reqFmt = 'auto'; // Default to auto
-$reqWidth = $thumbWidth; // Default to thumb width
+$reqFmt = 'auto'; 
+$reqWidth = $thumbWidth; 
 
 if ($isCli) {
     foreach ($argv as $arg) {
@@ -109,7 +117,6 @@ if ($isCli) {
     $reqPathInput = isset($_GET['path']) ? $_GET['path'] : null;
     $reqFile = isset($_GET['file']) ? $_GET['file'] : null;
     $reqFmt = isset($_GET['fmt']) ? $_GET['fmt'] : 'auto';
-    // Allow width override, but cap it for safety
     if (isset($_GET['w'])) {
         $w = intval($_GET['w']);
         if ($w > 0 && $w <= 3000) $reqWidth = $w;
@@ -135,7 +142,7 @@ if ($realSourcePath === false && !preg_match('/^[a-zA-Z0-9_\-\/]+$/', $targetDir
 $thumbPathAbs = $sourcePath . DIRECTORY_SEPARATOR . $thumbDirName;
 
 
-// --- LOGIC: THUMBNAIL DELIVERY (ON-THE-FLY) ---
+// --- LOGIC: THUMBNAIL DELIVERY ---
 if ($reqMode === 'thumb') {
     if ($securityError) { http_response_code(403); die("Access Denied"); }
     if (!$reqFile) { http_response_code(400); die("No file specified"); }
@@ -147,92 +154,52 @@ if ($reqMode === 'thumb') {
 
     if (!file_exists($srcFile)) { http_response_code(404); die("Image not found"); }
 
-    // --- SMART FORMAT NEGOTIATION (fmt=auto) ---
-    // If 'auto' is requested, we check the Accept header to serve the best possible format
     if ($reqFmt === 'auto') {
         $accept = isset($_SERVER['HTTP_ACCEPT']) ? $_SERVER['HTTP_ACCEPT'] : '';
-        if ($canAvif && strpos($accept, 'image/avif') !== false) {
-            $reqFmt = 'avif';
-        } elseif ($canWebp && strpos($accept, 'image/webp') !== false) {
-            $reqFmt = 'webp';
-        } else {
-            $reqFmt = 'jpg';
-        }
-        // Critical for caching: tell browsers/proxies that the result depends on the Accept header
+        if ($canAvif && strpos($accept, 'image/avif') !== false) $reqFmt = 'avif';
+        elseif ($canWebp && strpos($accept, 'image/webp') !== false) $reqFmt = 'webp';
+        else $reqFmt = 'jpg';
         header("Vary: Accept");
     }
 
-    // HASH GENERATION: Use modification time
     $mtime = filemtime($srcFile);
     $hash = substr(md5($mtime), 0, 8); 
     
-    // Determine extension
-    $destExt = match($reqFmt) {
-        'avif' => '.avif',
-        'webp' => '.webp',
-        default => '.jpg'
-    };
-    
-    // New filename structure: Name . Hash . Width . Extension
-    // Example: image.jpg.a1b2c3d4.w500.webp
+    $destExt = match($reqFmt) { 'avif' => '.avif', 'webp' => '.webp', default => '.jpg' };
     $destFileName = $fileName . '.' . $hash . '.w' . $reqWidth . $destExt;
     $destFile = $thumbPathAbs . DIRECTORY_SEPARATOR . $destFileName;
 
     if (!is_dir($thumbPathAbs)) mkdir($thumbPathAbs, 0755, true);
 
     if (!file_exists($destFile)) {
-        // --- CLEANUP OLD VERSIONS ---
-        // Cleanup logic to remove old versions of this specific size/file
+        // Cleanup old versions
         $dirHandle = opendir($thumbPathAbs);
         if ($dirHandle) {
             while (($file = readdir($dirHandle)) !== false) {
                 if ($file === '.' || $file === '..') continue;
-                
-                // Check prefix match
-                if (strpos($file, $fileName . '.') === 0) {
-                    // Check if it matches our width tag
-                    if (strpos($file, '.w' . $reqWidth . '.') !== false) {
-                         // It is this file at this width.
-                         // If it's not the exact new filename (implies different hash/ext), delete it.
-                         if ($file !== $destFileName) {
-                             @unlink($thumbPathAbs . DIRECTORY_SEPARATOR . $file);
-                         }
-                    }
+                if (strpos($file, $fileName . '.') === 0 && strpos($file, '.w' . $reqWidth . '.') !== false) {
+                     if ($file !== $destFileName) @unlink($thumbPathAbs . DIRECTORY_SEPARATOR . $file);
                 }
             }
             closedir($dirHandle);
         }
 
-        // --- GENERATION ---
-        $q = match($reqFmt) {
-            'avif' => $thumbQualityAvif,
-            'webp' => $thumbQualityWebp,
-            default => $thumbQualityJpg
-        };
-        
+        $q = match($reqFmt) { 'avif' => $thumbQualityAvif, 'webp' => $thumbQualityWebp, default => $thumbQualityJpg };
         $success = createThumbnail($srcFile, $destFile, $reqWidth, $reqFmt, $q);
         
         if (!$success) {
-            // Fallback: If AVIF/WebP fails, try JPG
             if ($reqFmt !== 'jpg') {
-                 // Recursively try to load JPG version
-                 $fallbackUrl = "?mode=thumb&path=".urlencode($targetDir)."&file=".urlencode($fileName)."&w=$reqWidth&fmt=jpg&v=".$hash;
+                 $fallbackUrl = "?mode=thumb&file=".urlencode($fileName)."&w=$reqWidth&fmt=jpg&v=".$hash;
                  header("Location: $fallbackUrl");
                  exit;
             } else {
-                header("Location: " . $targetDir . '/' . $fileName);
+                header("Location: /" . $targetDir . '/' . $fileName);
                 exit;
             }
         }
     }
 
-    // Mime Type
-    $mime = match($reqFmt) {
-        'avif' => 'image/avif',
-        'webp' => 'image/webp',
-        default => 'image/jpeg'
-    };
-
+    $mime = match($reqFmt) { 'avif' => 'image/avif', 'webp' => 'image/webp', default => 'image/jpeg' };
     $lastMod = filemtime($destFile);
     $etag = md5($destFile . $lastMod);
     
@@ -251,17 +218,14 @@ if ($reqMode === 'thumb') {
     exit;
 }
 
-// --- LOGIC: CLEANUP (RECURSIVE) ---
+// --- LOGIC: CLEANUP ---
 if ($reqMode === 'cleanup') {
     header('Content-Type: text/plain');
     if ($reqToken !== $cronSecret) die("Error: Invalid Token.");
     if ($securityError) die("Error: Security Violation.");
 
-    echo "--- Starting Recursive Cleanup ---\n";
-    echo "Root Directory: $sourcePath\n";
-    
+    echo "--- Starting Recursive Cleanup ---\nRoot: $sourcePath\n";
     $deletedCount = 0;
-
     $recursiveClean = function($currentDir) use (&$recursiveClean, $thumbDirName, &$deletedCount) {
         $items = @scandir($currentDir);
         if (!$items) return;
@@ -269,76 +233,61 @@ if ($reqMode === 'cleanup') {
         if (in_array($thumbDirName, $items) && is_dir($currentDir . DIRECTORY_SEPARATOR . $thumbDirName)) {
             $tDir = $currentDir . DIRECTORY_SEPARATOR . $thumbDirName;
             $tFiles = scandir($tDir);
-
             foreach ($tFiles as $tFile) {
                 if ($tFile === '.' || $tFile === '..') continue;
-
-                // Regex: Matches filename.hash.width.ext
-                // e.g. image.jpg.a1b2c3d4.w500.webp
-                // Removes everything from the first dot of the hash onwards
                 $origName = preg_replace('/(\.[a-f0-9]{8})(\.w\d+)?\.(avif|webp|jpg)$/', '', $tFile);
-                
-                $sourceFile = $currentDir . DIRECTORY_SEPARATOR . $origName;
-
-                if (!file_exists($sourceFile)) {
-                    $fullTPath = $tDir . DIRECTORY_SEPARATOR . $tFile;
-                    if (@unlink($fullTPath)) {
-                        echo "Deleted orphaned: " . $origName . " (" . $tFile . ")\n";
+                if (!file_exists($currentDir . DIRECTORY_SEPARATOR . $origName)) {
+                    if (@unlink($tDir . DIRECTORY_SEPARATOR . $tFile)) {
+                        echo "Deleted orphaned: $origName\n";
                         $deletedCount++;
                     }
                 }
             }
         }
-
         foreach ($items as $item) {
             if ($item === '.' || $item === '..' || $item === $thumbDirName) continue;
-            $fullPath = $currentDir . DIRECTORY_SEPARATOR . $item;
-            if (is_dir($fullPath)) {
-                $recursiveClean($fullPath);
-            }
+            if (is_dir($currentDir . DIRECTORY_SEPARATOR . $item)) $recursiveClean($currentDir . DIRECTORY_SEPARATOR . $item);
         }
     };
-
     $recursiveClean($sourcePath);
-
-    echo "\n--- Cleanup Finished ---\n";
-    echo "Total files deleted: $deletedCount\n";
+    echo "Deleted: $deletedCount\n";
     exit;
 }
 
-// --- LOGIC: DOWNLOAD (STREAMING) ---
+// --- LOGIC: DOWNLOAD (Updated for Corruption Check) ---
 if ($reqMode === 'download') {
     if ($securityError) die($securityError);
-
-    if (file_exists(__DIR__ . '/vendor/autoload.php')) {
-        require_once __DIR__ . '/vendor/autoload.php';
-    } else {
-        die("Error: Vendor missing. Please run 'composer install' to enable streaming downloads.");
-    }
-
-    $zipName = 'gallery.zip';
+    if (file_exists(__DIR__ . '/vendor/autoload.php')) require_once __DIR__ . '/vendor/autoload.php';
+    else die("Error: Vendor missing.");
 
     try {
-        $zip = new \ZipStream\ZipStream(
-            outputName: $zipName,
-            sendHttpHeaders: true
-        );
-
+        $zip = new \ZipStream\ZipStream(outputName: 'gallery.zip', sendHttpHeaders: true);
+        
         foreach (scandir($sourcePath) as $f) {
             if (in_array($f, $ignoredFiles)) continue;
+            
             $filePath = $sourcePath . DIRECTORY_SEPARATOR . $f;
-            if (is_file($filePath)) {
-                $zip->addFileFromPath($f, $filePath);
+            $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
+
+            if (!is_file($filePath)) continue;
+            if (!in_array($ext, $validExtensions)) continue;
+
+            // Integrity Check
+            $dims = @getimagesize($filePath);
+            if (!$dims) continue; 
+
+            if (($ext === 'jpg' || $ext === 'jpeg') && !isJpegIntegrityOk($filePath)) {
+                continue; 
             }
+
+            $zip->addFileFromPath($f, $filePath);
         }
         $zip->finish();
-    } catch (Exception $e) {
-        error_log("ZipStream Error: " . $e->getMessage());
-    }
+    } catch (Exception $e) { error_log("Zip Error: " . $e->getMessage()); }
     exit;
 }
 
-// --- LOGIC: VIEW ---
+// --- LOGIC: SCAN FILES ---
 if ($securityError) die($securityError);
 
 $images = [];
@@ -353,10 +302,18 @@ if (is_dir($sourcePath)) {
         $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
 
         if (is_file($filePath) && in_array($ext, $validExtensions)) {
+            $dims = @getimagesize($filePath);
+            if (!$dims) { if ($deleteCorruptedFiles) @unlink($filePath); continue; }
+            if (($ext === 'jpg' || $ext === 'jpeg') && !isJpegIntegrityOk($filePath)) {
+                if ($deleteCorruptedFiles) @unlink($filePath); continue;
+            }
+            
             $fileList[] = [
                 'name' => $file,
                 'path' => $filePath,
-                'time' => filemtime($filePath)
+                'time' => filemtime($filePath),
+                'w'    => $dims[0],
+                'h'    => $dims[1]
             ];
         }
     }
@@ -365,47 +322,40 @@ if (is_dir($sourcePath)) {
 
     foreach ($fileList as $fInfo) {
         $file = $fInfo['name'];
-        $dims = @getimagesize($fInfo['path']);
+        $w = $fInfo['w'];
+        $h = $fInfo['h'];
+        $tH = floor($thumbWidth * ($h / $w));
+        $fullW = ($w > $lightboxWidth) ? $lightboxWidth : $w;
+        $fullH = floor($fullW * ($h / $w));
+        $fileHash = substr(md5($fInfo['time']), 0, 8);
 
-        if ($dims) {
-            $w = $dims[0];
-            $h = $dims[1];
-            
-            // Thumbnail dimensions
-            $tH = floor($thumbWidth * ($h / $w));
-            
-            // Lightbox dimensions (resized to fit $lightboxWidth)
-            // If original is smaller than lightboxWidth, use original dims
-            $fullW = ($w > $lightboxWidth) ? $lightboxWidth : $w;
-            $fullH = floor($fullW * ($h / $w));
+        // NOTE: Parameters are relative to current URL (handled by htaccess)
+        $urlParams = '?file=' . urlencode($file) . '&v=' . $fileHash;
 
-            // Hash
-            $fileHash = substr(md5($fInfo['time']), 0, 8);
+        $thumbBase = $urlParams . '&mode=thumb&w=' . $thumbWidth;
+        $lightboxUrl = $urlParams . '&mode=thumb&w=' . $fullW;
 
-            // Base URL parameters
-            $urlParams = '?path=' . urlencode($targetDir) . '&file=' . urlencode($file) . '&v=' . $fileHash;
-
-            // Thumbnail URLs (Fixed Sizes)
-            $thumbBase = $urlParams . '&mode=thumb&w=' . $thumbWidth;
-            
-            // Lightbox URL (Auto Format, High Res)
-            // We use default auto behavior so PHP decides based on browser support (AVIF > WebP > JPG)
-            $lightboxUrl = $urlParams . '&mode=thumb&w=' . $fullW;
-
-            $images[] = [
-                'name' => $file,
-                'orig_src' => $targetDir . '/' . $file, // Direct link to original for download
-                'lightbox_src' => $lightboxUrl,
-                'w' => $fullW,
-                'h' => $fullH,
-                'thumb_w' => $thumbWidth,
-                'thumb_h' => $tH,
-                'thumb_jpg'  => $thumbBase . '&fmt=jpg',
-                'thumb_webp' => $thumbBase . '&fmt=webp',
-                'thumb_avif' => $thumbBase . '&fmt=avif'
-            ];
-        }
+        $images[] = [
+            'name' => $file,
+            // Absolute path for originals to support Rewrites
+            'orig_src' => '/' . $targetDir . '/' . $file, 
+            'lightbox_src' => $lightboxUrl,
+            'w' => $fullW,
+            'h' => $fullH,
+            'thumb_w' => $thumbWidth,
+            'thumb_h' => $tH,
+            'thumb_jpg'  => $thumbBase . '&fmt=jpg',
+            'thumb_webp' => $thumbBase . '&fmt=webp',
+            'thumb_avif' => $thumbBase . '&fmt=avif'
+        ];
     }
+}
+
+// --- LOGIC: JSON API ---
+if ($reqMode === 'json') {
+    header('Content-Type: application/json');
+    echo json_encode(['images' => $images, 'capabilities' => ['avif' => $canAvif, 'webp' => $canWebp]]);
+    exit;
 }
 ?>
 <!DOCTYPE html>
@@ -414,10 +364,9 @@ if (is_dir($sourcePath)) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, follow">
-    <title>reisinger.pictures</title>
+    <title>reisinger.pictures LIVE</title>
     <link rel="icon" href="https://reisinger.pictures/favicon-32x32.png" type="image/png">
-    
-    <link rel="stylesheet" href="assets/css/photoswipe/photoswipe.css">
+    <link rel="stylesheet" href="/assets/css/photoswipe/photoswipe.css">
 
     <style>
         :root {
@@ -430,95 +379,37 @@ if (is_dir($sourcePath)) {
             --color-error: oklch(71% .194 13.428);
             --color-neutral: oklch(14% .005 285.823);
         }
-        body {
-            font-family: system-ui, sans-serif;
-            background-color: var(--color-base-100);
-            color: var(--color-base-content);
-            margin: 0; padding: 20px;
-        }
-        header {
-            text-align: center; margin-bottom: 30px; padding-top: 20px;
-            display: flex; flex-direction: column; align-items: center;
-        }
-        .site-logo {
-            width: 80px; height: auto; border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-bottom: 15px;
-        }
-        h1 {
-            font-weight: 300; margin: 0; display: inline-flex; align-items: center;
-            gap: 15px; font-size: 2rem; flex-wrap: wrap; justify-content: center;
-        }
-        .live-badge {
-            font-weight: 700; font-size: 0.6em; letter-spacing: 1px;
-            color: var(--color-error); display: flex; align-items: center;
-            gap: 8px; border: 1px solid var(--color-error); padding: 4px 10px;
-            border-radius: 4px; background: oklch(from var(--color-error) l c h / 0.1);
-        }
-        .record-dot {
-            width: 10px; height: 10px; background-color: var(--color-error);
-            border-radius: 50%; display: inline-block; animation: pulse-red 2s infinite;
-        }
-        @keyframes pulse-red {
-            0% { transform: scale(0.95); opacity: 1; }
-            70% { transform: scale(1); opacity: 0.5; }
-            100% { transform: scale(0.95); opacity: 1; }
-        }
-        .btn-download {
-           display: inline-block; margin-top: 10px; text-decoration: underline;
-           color: var(--color-neutral); border: none; padding: 4px 8px;
-           background: transparent; transition: all 0.2s ease;
-        }
+        body { font-family: system-ui, sans-serif; background: var(--color-base-100); color: var(--color-base-content); margin: 0; padding: 20px; }
+        header { text-align: center; margin-bottom: 30px; padding-top: 20px; display: flex; flex-direction: column; align-items: center; }
+        .site-logo { width: 80px; height: auto; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        h1 { font-weight: 300; margin: 0; display: inline-flex; align-items: center; gap: 15px; font-size: 2rem; flex-wrap: wrap; justify-content: center; }
+        .live-badge { font-weight: 700; font-size: 0.6em; letter-spacing: 1px; color: var(--color-error); display: flex; align-items: center; gap: 8px; border: 1px solid var(--color-error); padding: 4px 10px; border-radius: 4px; background: oklch(from var(--color-error) l c h / 0.1); }
+        .record-dot { width: 10px; height: 10px; background-color: var(--color-error); border-radius: 50%; display: inline-block; animation: pulse-red 2s infinite; }
+        @keyframes pulse-red { 0% { transform: scale(0.95); opacity: 1; } 70% { transform: scale(1); opacity: 0.5; } 100% { transform: scale(0.95); opacity: 1; } }
+        .btn-download { display: inline-block; margin-top: 10px; text-decoration: underline; color: var(--color-neutral); border: none; padding: 4px 8px; background: transparent; transition: all 0.2s ease; }
         .btn-download:hover { color: var(--color-primary); }
-
-        /* Grid Optimizations */
-        .gallery-grid {
-            max-width: 1600px; margin: 40px auto 0;
-            column-count: 4; column-gap: 20px;
-        }
+        .gallery-grid { max-width: 1600px; margin: 40px auto 0; column-count: 4; column-gap: 20px; }
         @media (max-width: 1400px) { .gallery-grid { column-count: 3; } }
         @media (max-width: 900px)  { .gallery-grid { column-count: 2; } }
         @media (max-width: 500px)  { .gallery-grid { column-count: 1; } }
-
-        .gallery-item {
-            position: relative; display: inline-block; width: 100%;
-            margin-bottom: 20px; break-inside: avoid; border-radius: 8px;
-            background: var(--color-base-200); transition: transform 0.2s;
-            cursor: pointer; border: 1px solid var(--color-base-300);
-            text-decoration: none; line-height: 0;
-        }
-        .gallery-item:hover {
-            transform: scale(1.02); z-index: 2;
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
-            border-color: var(--color-primary);
-        }
-        
-        /* IMPORTANT: Picture Tag Styling */
-        .gallery-item picture {
-            display: block; width: 100%; height: auto;
-        }
-        .gallery-item img {
-            width: 100%; height: auto; display: block;
-            border-radius: 7px; background: #eee;
-        }
-
-        .footer {
-            text-align: center; margin-top: 60px; padding-bottom: 20px;
-            color: var(--color-neutral); font-size: 0.9em;
-            border-top: 1px solid var(--color-base-200); padding-top: 30px;
-        }
+        .gallery-item { position: relative; display: inline-block; width: 100%; margin-bottom: 20px; break-inside: avoid; border-radius: 8px; background: var(--color-base-200); transition: transform 0.2s; cursor: pointer; border: 1px solid var(--color-base-300); text-decoration: none; line-height: 0; }
+        .gallery-item:hover { transform: scale(1.02); z-index: 2; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); border-color: var(--color-primary); }
+        .gallery-item picture { display: block; width: 100%; height: auto; }
+        .gallery-item img { width: 100%; height: auto; display: block; border-radius: 7px; background: #eee; }
+        .footer { text-align: center; margin-top: 60px; padding-bottom: 20px; color: var(--color-neutral); font-size: 0.9em; border-top: 1px solid var(--color-base-200); padding-top: 30px; }
         .footer strong { color: var(--color-primary); }
     </style>
 </head>
 <body>
 
     <header>
-        <img src="https://reisinger.pictures/apple-touch-icon.png" alt="Reisinger Pictures Logo" class="site-logo">
+        <img src="https://reisinger.pictures/apple-touch-icon.png" alt="Logo" class="site-logo">
         <h1>
             <span>reisinger.pictures</span>
             <span class="live-badge"><span class="record-dot"></span> LIVE</span>
         </h1>
         <?php if (!empty($images)): ?>
-            <a href="?path=<?php echo urlencode($targetDir); ?>&mode=download" class="btn-download">
+            <a href="?mode=download" class="btn-download">
                 &darr; Alle Bilder herunterladen (ZIP)
             </a>
         <?php endif; ?>
@@ -526,11 +417,6 @@ if (is_dir($sourcePath)) {
 
     <div class="gallery-grid" id="my-gallery">
         <?php foreach ($images as $img): ?>
-            <!-- 
-                LIGHTBOX LINK:
-                Points to the "auto" formatted high-res image.
-                data-original-src stores the direct path to the raw file for downloading.
-            -->
             <a href="<?php echo htmlspecialchars($img['lightbox_src']); ?>"
                class="gallery-item"
                data-pswp-width="<?php echo $img['w']; ?>"
@@ -542,18 +428,15 @@ if (is_dir($sourcePath)) {
                    <?php if ($canAvif): ?>
                        <source srcset="<?php echo $img['thumb_avif']; ?>" type="image/avif">
                    <?php endif; ?>
-                   
                    <?php if ($canWebp): ?>
                        <source srcset="<?php echo $img['thumb_webp']; ?>" type="image/webp">
                    <?php endif; ?>
-                   
                    <img src="<?php echo $img['thumb_jpg']; ?>" 
                         alt="<?php echo htmlspecialchars($img['name']); ?>"
                         width="<?php echo $img['thumb_w']; ?>"
                         height="<?php echo $img['thumb_h']; ?>"
                         loading="lazy" />
                </picture>
-
             </a>
         <?php endforeach; ?>
 
@@ -571,16 +454,20 @@ if (is_dir($sourcePath)) {
     </div>
 
     <script type="module">
-        import PhotoSwipeLightbox from './assets/js/photoswipe/photoswipe-lightbox.esm.min.js';
-        import PhotoSwipe from './assets/js/photoswipe/photoswipe.esm.min.js';
+        import PhotoSwipeLightbox from '/assets/js/photoswipe/photoswipe-lightbox.esm.min.js';
+        import PhotoSwipe from '/assets/js/photoswipe/photoswipe.esm.min.js';
+
+        const pollInterval = 30000; 
+        const galleryGrid = document.getElementById('my-gallery');
+        
+        // Note: No targetPath needed anymore, browser URL handles it via htaccess
 
         const lightbox = new PhotoSwipeLightbox({
             gallery: '#my-gallery',
             children: 'a',
             pswpModule: PhotoSwipe
         });
-        
-        // Download Button (Updated to prefer original source)
+
         lightbox.on('uiRegister', function() {
             lightbox.pswp.ui.registerElement({
                 name: 'download-button',
@@ -598,7 +485,6 @@ if (is_dir($sourcePath)) {
                     pswp.on('change', () => {
                         const currSlide = pswp.currSlide;
                         if (currSlide && currSlide.data.element) {
-                            // Try to get data-original-src from the DOM element
                             const orig = currSlide.data.element.getAttribute('data-original-src');
                             el.href = orig ? orig : currSlide.data.src;
                         } else if (currSlide) {
@@ -610,6 +496,79 @@ if (is_dir($sourcePath)) {
         });
 
         lightbox.init();
+
+        function createGalleryItemHTML(img, caps) {
+            let sources = '';
+            if (caps.avif) sources += `<source srcset="${img.thumb_avif}" type="image/avif">`;
+            if (caps.webp) sources += `<source srcset="${img.thumb_webp}" type="image/webp">`;
+
+            return `
+               <picture>
+                   ${sources}
+                   <img src="${img.thumb_jpg}" 
+                        alt="${escapeHtml(img.name)}"
+                        width="${img.thumb_w}"
+                        height="${img.thumb_h}"
+                        loading="lazy" />
+               </picture>
+            `;
+        }
+
+        function escapeHtml(text) {
+            if (!text) return text;
+            return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+        }
+
+        async function checkForUpdates() {
+            try {
+                // Browsers sends request to current URL (e.g., /vacation?mode=json).
+                // Htaccess rewrites this to index.php?path=vacation&mode=json.
+                const response = await fetch('?mode=json');
+                
+                if (!response.ok) throw new Error('Network response was not ok');
+                
+                const data = await response.json();
+                const serverImages = data.images;
+                const capabilities = data.capabilities;
+
+                const existingLinks = galleryGrid.querySelectorAll('a.gallery-item');
+                const existingNames = new Set();
+                
+                existingLinks.forEach(link => {
+                    const src = link.getAttribute('data-original-src');
+                    if (src) existingNames.add(src.split('/').pop());
+                });
+
+                const newItems = serverImages.filter(img => !existingNames.has(img.name));
+
+                if (newItems.length > 0) {
+                    console.log(`Found ${newItems.length} new images.`);
+                    for (let i = newItems.length - 1; i >= 0; i--) {
+                        const img = newItems[i];
+                        const a = document.createElement('a');
+                        a.href = img.lightbox_src;
+                        a.className = 'gallery-item';
+                        a.setAttribute('data-pswp-width', img.w);
+                        a.setAttribute('data-pswp-height', img.h);
+                        a.setAttribute('data-original-src', img.orig_src);
+                        a.target = '_blank';
+                        a.innerHTML = createGalleryItemHTML(img, capabilities);
+                        a.style.opacity = '0';
+                        a.style.transition = 'opacity 1s ease';
+                        galleryGrid.prepend(a);
+                        void a.offsetWidth; 
+                        a.style.opacity = '1';
+                    }
+                    const emptyMsg = galleryGrid.querySelector('p');
+                    if (emptyMsg && galleryGrid.children.length > 1) emptyMsg.remove();
+                }
+
+            } catch (error) {
+                console.warn('Auto-update check failed:', error);
+            }
+        }
+
+        setInterval(checkForUpdates, pollInterval);
     </script>
 </body>
 </html>
